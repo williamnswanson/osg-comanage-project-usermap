@@ -157,6 +157,13 @@ def get_identifier(id_, endpoint, authstr):
         raise RuntimeError("No such Identifier Id: %s" % id_)
     return idfs[0]
 
+def get_person_emails(pid, endpoint, authstr):
+    resp_data = call_api("email_addresses.json", endpoint, authstr, copersonid=pid)
+    emaillist = get_datalist(resp_data, "EmailAddresses")
+    return emaillist
+
+def core_api_co_person_read(identifier, coid, endpoint, authstr):
+    return call_api(f"api/co/{coid}/core/v1/people/{identifier}", endpoint, authstr)
 
 def get_unix_cluster_groups(ucid, endpoint, authstr):
     return call_api("unix_cluster/unix_cluster_groups.json", endpoint, authstr, unix_cluster_id=ucid)
