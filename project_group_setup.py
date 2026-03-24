@@ -7,7 +7,7 @@ import comanage_utils as utils
 
 SCRIPT = os.path.basename(__file__)
 ENDPOINT = "https://registry.cilogon.org/registry/"
-LDAP_SERVER = "ldaps://ldap.cilogon.org"
+LDAP_SERVER_LIST = ["ldaps://ldap-replica-1.osg.chtc.io", "ldaps://ldap-replica-2.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
 LDAP_USER = "uid=readonly_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
 OSG_CO_ID = 7
 UNIX_CLUSTER_ID = 1
@@ -25,9 +25,9 @@ OPTIONS:
   -c OSG_CO_ID        specify OSG CO ID (default = {OSG_CO_ID})
   -g CLUSTER_ID       specify UNIX Cluster ID (default = {UNIX_CLUSTER_ID})
   -l LDAP_TARGET      specify LDAP Provsion ID (defult = {LDAP_TARGET_ID})
-  -s LDAP_SERVER      specify LDAP server
+  -s LDAP_SERVER_LIST      specify a comma-delimited list of LDAP servers (falling back to later entries)
   -y LDAP_USER        specify LDAP server user
-  -p LDAP authtok     specify LDAP server authtok
+  -a LDAP_AUTH_PATH     specify path to file/dir to open and read LDAP authtoks
   -d passfd           specify open fd to read PASS
   -f passfile         specify path to file to open and read PASS
   -e ENDPOINT         specify REST endpoint
@@ -58,10 +58,10 @@ class Options:
     ucid = UNIX_CLUSTER_ID
     provision_target = LDAP_TARGET_ID
     ldap_user = LDAP_USER
-    ldap_server = LDAP_SERVER
+    ldap_server_list = LDAP_SERVER_LIST
     outfile = None
     authstr = None
-    ldap_authtok = None
+    ldap_authtok_list = None
     project_gid_startval = PROJECT_GIDS_START
 
 
@@ -70,7 +70,7 @@ options = Options()
 
 def parse_options(args):
     try:
-        ops, args = getopt.getopt(args, "u:c:g:l:p:d:f:e:o:s:y:h")
+        ops, args = getopt.getopt(args, "u:c:g:l:a:d:f:e:o:s:y:h")
     except getopt.GetoptError:
         usage()
 
@@ -79,6 +79,7 @@ def parse_options(args):
 
     passfd = None
     passfile = None
+    ldap_authfile = None
 
     for op, arg in ops:
         if op == "-h":
@@ -91,8 +92,8 @@ def parse_options(args):
             options.ucid = int(arg)
         if op == "-l":
             options.provision_target = int(arg)
-        if op == "-p":
-            options.ldap_authtok = arg
+        if op == "-a":
+            ldap_authfile  = arg
         if op == "-d":
             passfd = int(arg)
         if op == "-f":
@@ -102,13 +103,14 @@ def parse_options(args):
         if op == "-o":
             options.outfile = arg
         if op == "-s":
-            options.ldap_server = arg
+            options.ldap_server_list = arg.split(",")
         if op == "-y":
             options.ldap_user = arg
 
     try:
         user, passwd = utils.getpw(options.user, passfd, passfile)
         options.authstr = utils.mkauthstr(user, passwd)
+        options.ldap_authtok_list = utils.get_ldap_authtoks(ldap_authfile )
     except PermissionError:
         usage("PASS required")
 
@@ -182,7 +184,7 @@ def get_projects_needing_cluster_groups(project_groups):
 
 def get_projects_needing_provisioning(project_groups):
     # project groups provisioned in LDAP
-    ldap_group_osggids = utils.get_ldap_groups(options.ldap_server, options.ldap_user, options.ldap_authtok)
+    ldap_group_osggids = utils.get_ldap_groups(options.ldap_server_list, options.ldap_user, options.ldap_authtok_list)
     try:
         # All project osggids
         project_osggids = set(

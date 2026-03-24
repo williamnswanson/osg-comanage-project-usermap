@@ -3,26 +3,27 @@
 import os
 import re
 import json
+import pathlib
 import time
 import urllib.error
 import urllib.request
 from ldap3 import Server, Connection, ALL, SAFE_SYNC, Tls
+from ldap3.core.exceptions import LDAPException, LDAPInvalidCredentialsResult
 from dataclasses import dataclass
 
 #PRODUCTION VALUES
 
 PRODUCTION_ENDPOINT = "https://registry.cilogon.org/registry/"
-PRODUCTION_LDAP_SERVER = "ldaps://ldap.cilogon.org"
+PRODUCTION_LDAP_SERVER_LIST = ["ldaps://ldap-replica.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
 PRODUCTION_LDAP_USER = "uid=readonly_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
 PRODUCTION_OSG_CO_ID = 7
 PRODUCTION_UNIX_CLUSTER_ID = 1
 PRODUCTION_LDAP_TARGET_ID = 6
-LDAP_BASE_DN = "o=OSG,o=CO,dc=cilogon,dc=org"
 
 #TEST VALUES
 
 TEST_ENDPOINT = "https://registry-test.cilogon.org/registry/"
-TEST_LDAP_SERVER = "ldaps://ldap-test.cilogon.org"
+TEST_LDAP_SERVER_LIST = ["ldaps://ldap-test.cilogon.org"]
 TEST_LDAP_USER ="uid=registry_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
 TEST_OSG_CO_ID = 8
 TEST_UNIX_CLUSTER_ID = 10
@@ -32,6 +33,11 @@ TEST_LDAP_TARGET_ID = 9
 TIMEOUT_BASE = 5
 MAX_ATTEMPTS = 5
 
+# LDAP Search Bases
+CILGON_LDAP_SERVERS = ["ldaps://ldap.cilogon.org"]
+CILOGON_LDAP_BASE_DN = "o=OSG,o=CO,dc=cilogon,dc=org"
+OSG_LDAP_SERVERS = ["ldaps://ldap-replica-1.osg.chtc.io", "ldaps://ldap-replica-2.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
+OSG_LDAP_BASE_DN = "dc=osg-htc,dc=org"
 
 GET    = "GET"
 PUT    = "PUT"
@@ -71,12 +77,26 @@ def mkauthstr(user, passwd):
     return encodebytes(raw_authstr.encode()).decode().replace("\n", "")
 
 
-def get_ldap_authtok(ldap_authfile):
-    if ldap_authfile is not None:
-        ldap_authtok = open(ldap_authfile).readline().strip()
+def get_ldap_authtoks(ldap_auth_path):
+    auth_path = pathlib.Path(ldap_auth_path)
+    authfile_list = []
+    ldap_authtok_list = []
+    if ldap_auth_path is not None and auth_path.exists():
+        if auth_path.is_dir():
+            for child in auth_path.iterdir():
+                if child.is_file():
+                    authfile_list.append(child)
+        elif auth_path.is_file():
+            authfile_list.append()
+        else:
+            raise ValueError
+        
+        for entry in authfile_list:
+            with entry.open() as authfile:
+                ldap_authtok_list.append(authfile.readline().strip())
     else:
         raise PermissionError
-    return ldap_authtok
+    return ldap_authtok_list
 
 
 def mkrequest(method, target, data, endpoint, authstr, **kw):
@@ -180,31 +200,98 @@ class LDAPSearch:
     server: Server = None
     connection: Connection = None
 
-    def __init__(self, ldap_server, ldap_user, ldap_authtok):
+    def __init__(self, ldap_server, ldap_user, ldap_authtok_list):
         self.server = Server(ldap_server, get_info=ALL)
-        self.connection = Connection(self.server, ldap_user, ldap_authtok, client_strategy=SAFE_SYNC, auto_bind=True)
+        for ldap_authtok in ldap_authtok_list:
+            try:
+                self.connection = Connection(self.server, ldap_user, ldap_authtok, client_strategy=SAFE_SYNC, auto_bind=True)
+                break
+            except LDAPInvalidCredentialsResult as wrongCreds:
+                continue
+        else:
+            #https://docs.python.org/3.7/tutorial/controlflow.html#break-and-continue-statements-and-else-clauses-on-loops
 
-    def search(self, ou, filter_str, attrs):
-        _, _, response, _ = self.connection.search(f"ou={ou},{LDAP_BASE_DN}", filter_str, attributes=attrs)
+            # The only exceptions were "Invalid Creds" but we still failed to break out
+            # Therefore all creds failed
+            raise LDAPInvalidCredentialsResult
+
+    def search(self, ou, search_base, filter_str, attrs):
+        # simple paged search
+        # https://github.com/cannatag/ldap3/blob/7991e67d0a2fb2c1f9cbf832d110ad29fc378f9b/docs/manual/source/standard.rst#L4
+        # https://ldap3.readthedocs.io/en/latest/tutorial_searches.html#simple-paged-search
+        response = self.connection.extend.standard.paged_search(
+            f"ou={ou},{search_base}",
+            filter_str, 
+            attributes=attrs,
+            paged_size=500,
+            generator=True
+        )
+
         return response
 
-def get_ldap_groups(ldap_server, ldap_user, ldap_authtok):
+def do_ldap_fallback_search(ldap_server_list, ldap_authtok_list, search_ou, search_filter, attrs):
+    response = None
+
+    for ldap_server in ldap_server_list:
+        print(f"Attempting search with server {ldap_server}")
+        try:            
+            search_base = None
+
+            if ldap_server in CILGON_LDAP_SERVERS:
+                search_base = CILOGON_LDAP_BASE_DN
+            elif ldap_server in OSG_LDAP_SERVERS:
+                search_base = OSG_LDAP_BASE_DN
+            else:
+                print(f"No Search Base found for server {ldap_server}. Skipping.")
+                continue
+            
+            if not search_base is None: 
+                searcher = LDAPSearch(ldap_server, f"uid=readonly_user,ou=system,{search_base}", ldap_authtok_list)
+                response = searcher.search(search_ou, search_base, search_filter, attrs)
+                
+                #If we get a response from one of the servers, we don't need to check the rest 
+                if not response is None:
+                    print(f"Response found for server {ldap_server}.")
+                    break
+        except LDAPException as ldapError:
+            print(f"Exception occurred when attempting search for {ldap_server}: {ldapError}.")
+            continue
+
+    if response is None:
+        print(f"No response found via LDAP servers {ldap_server_list}. Exiting.")
+        raise Exception
+
+    return response
+
+def get_ldap_groups(ldap_server_list, ldap_authtok_list):
     ldap_group_osggids = set()
-    searcher = LDAPSearch(ldap_server, ldap_user, ldap_authtok)
-    response = searcher.search("groups", "(cn=*)", ["gidNumber"])
+
+    response = do_ldap_fallback_search(
+        ldap_server_list, 
+        ldap_authtok_list=ldap_authtok_list,
+        search_ou="groups",
+        search_filter="(cn=*)",
+        attrs=["gidNumber"]
+    )
+
     for group in response:
         ldap_group_osggids.add(group["attributes"]["gidNumber"])
     return ldap_group_osggids
 
 
-def get_ldap_active_users_and_groups(ldap_server, ldap_user, ldap_authtok, filter_group_name=None):
+def get_ldap_active_users_and_groups(ldap_server_list, ldap_user, ldap_authtok, filter_group_name=None):
     """ Retrieve a dictionary of active users from LDAP, with their group memberships. """
     ldap_active_users = dict()
     filter_str = ("(isMemberOf=CO:members:active)" if filter_group_name is None 
                   else f"(&(isMemberOf={filter_group_name})(isMemberOf=CO:members:active))")
 
-    searcher = LDAPSearch(ldap_server, ldap_user, ldap_authtok)
-    response = searcher.search("people", filter_str, ["employeeNumber", "isMemberOf"])
+    response = do_ldap_fallback_search(
+        ldap_server_list=ldap_server_list,  
+        ldap_authtok_list=ldap_authtok,
+        search_ou="people",
+        search_filter=filter_str,
+        attrs=["employeeNumber", "isMemberOf"]
+    )
 
     for person in response:
         ldap_active_users[person["attributes"]["employeeNumber"]] = person["attributes"].get("isMemberOf", [])
