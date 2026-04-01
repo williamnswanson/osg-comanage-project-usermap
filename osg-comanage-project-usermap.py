@@ -24,9 +24,7 @@ usage: {SCRIPT} [OPTIONS]
 OPTIONS:
   -u USER[:PASS]      specify USER and optionally PASS on command line
   -c OSG_CO_ID        specify OSG CO ID (default = {OSG_CO_ID})
-  -s LDAP_SERVER      specify LDAP server to read data from
-  -l LDAP_USER        specify LDAP user for reading data from LDAP server
-  -a LDAP_AUTH_PATH    specify path to file/dir to open and read LDAP authtoks
+  -l LDAP_CONFIG_PATH        specify path to LDAP Config file for fallback-search servers
   -d passfd           specify open fd to read PASS
   -f passfile         specify path to file to open and read PASS
   -e ENDPOINT         specify REST endpoint
@@ -42,6 +40,9 @@ PASS for USER is taken from the first of:
   2. -d passfd (read from fd)
   3. -f passfile (read from file)
   4. read from $PASS env var
+
+{utils.LDAP_CONFIG_USAGE_MESSAGE}
+
 """
 
 def usage(msg=None):
@@ -58,10 +59,8 @@ class Options:
     osg_co_id = OSG_CO_ID
     outfile = None
     authstr = None
-    ldap_server_list = LDAP_SERVER_LIST
-    ldap_user = LDAP_USER
-    ldap_authtok_list = None
     filtergrp = None
+    ldap_config = None
     min_users = 100 # Bail out before updating the file if we have fewer than this many users
     localmaps = []
 
@@ -80,7 +79,7 @@ def get_osg_co_groups__map():
 
 def parse_options(args):
     try:
-        ops, args = getopt.getopt(args, 'u:c:s:l:a:d:f:g:e:o:h:n:m:')
+        ops, args = getopt.getopt(args, 'u:c:l:d:f:g:e:o:h:n:m:')
     except getopt.GetoptError:
         usage()
 
@@ -95,9 +94,7 @@ def parse_options(args):
         if op == '-h': usage()
         if op == '-u': options.user       = arg
         if op == '-c': options.osg_co_id  = int(arg)
-        if op == '-s': options.ldap_server_list = arg.split(",")
-        if op == '-l': options.ldap_user  = arg
-        if op == '-a': ldap_auth_path      = arg
+        if op == '-l': ldap_config_path   = arg
         if op == '-d': passfd             = int(arg)
         if op == '-f': passfile           = arg
         if op == '-e': options.endpoint   = arg
@@ -109,9 +106,13 @@ def parse_options(args):
     try:
         user, passwd = utils.getpw(options.user, passfd, passfile)
         options.authstr = utils.mkauthstr(user, passwd)
-        options.ldap_authtok_list = utils.get_ldap_authtoks(ldap_auth_path)
     except PermissionError:
         usage("PASS required")
+    
+    try:
+        options.ldap_config = utils.read_ldap_conffile(ldap_config_path)
+    except utils.EmptyConfiguration:
+        usage("LDAP Config File Required. Was empty or lacked a valid server configuration.")
 
 def _deduplicate_list(items):
     """ Deduplicate a list while maintaining order by converting it to a dictionary and then back to a list. 
@@ -120,7 +121,7 @@ def _deduplicate_list(items):
     return list(dict.fromkeys(items))
 
 def get_osguser_groups(filter_group_name=None):
-    ldap_users = utils.get_ldap_active_users_and_groups(options.ldap_server_list, options.ldap_user, options.ldap_authtok_list, filter_group_name)
+    ldap_users = utils.get_ldap_active_users_and_groups(filter_group_name=filter_group_name, config=options.ldap_config)
     topology_projects = requests.get(f"{TOPOLOGY_ENDPOINT}/miscproject/json").json()
     project_names = topology_projects.keys()
     

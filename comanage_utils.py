@@ -3,41 +3,63 @@
 import os
 import re
 import json
-import pathlib
 import time
+import configparser
 import urllib.error
 import urllib.request
+from enum import StrEnum
+from pathlib import Path
 from ldap3 import Server, Connection, ALL, SAFE_SYNC, Tls
-from ldap3.core.exceptions import LDAPException, LDAPInvalidCredentialsResult
+from ldap3.core.exceptions import LDAPException
 from dataclasses import dataclass
 
 #PRODUCTION VALUES
 
-PRODUCTION_ENDPOINT = "https://registry.cilogon.org/registry/"
-PRODUCTION_LDAP_SERVER_LIST = ["ldaps://ldap-replica.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
-PRODUCTION_LDAP_USER = "uid=readonly_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
-PRODUCTION_OSG_CO_ID = 7
-PRODUCTION_UNIX_CLUSTER_ID = 1
-PRODUCTION_LDAP_TARGET_ID = 6
+# PRODUCTION_ENDPOINT = "https://registry.cilogon.org/registry/"
+# PRODUCTION_LDAP_USER = "uid=readonly_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
+# PRODUCTION_OSG_CO_ID = 7
+# PRODUCTION_UNIX_CLUSTER_ID = 1
+# PRODUCTION_LDAP_TARGET_ID = 6
 
 #TEST VALUES
 
-TEST_ENDPOINT = "https://registry-test.cilogon.org/registry/"
-TEST_LDAP_SERVER_LIST = ["ldaps://ldap-test.cilogon.org"]
-TEST_LDAP_USER ="uid=registry_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
-TEST_OSG_CO_ID = 8
-TEST_UNIX_CLUSTER_ID = 10
-TEST_LDAP_TARGET_ID = 9
+# TEST_ENDPOINT = "https://registry-test.cilogon.org/registry/"
+# TEST_LDAP_SERVER_LIST = ["ldaps://ldap-test.cilogon.org"]
+# TEST_LDAP_USER ="uid=registry_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
+# TEST_OSG_CO_ID = 8
+# TEST_UNIX_CLUSTER_ID = 10
+# TEST_LDAP_TARGET_ID = 9
 
 # Value for the base of the exponential backoff
 TIMEOUT_BASE = 5
 MAX_ATTEMPTS = 5
 
 # LDAP Search Bases
-CILGON_LDAP_SERVERS = ["ldaps://ldap.cilogon.org"]
-CILOGON_LDAP_BASE_DN = "o=OSG,o=CO,dc=cilogon,dc=org"
-OSG_LDAP_SERVERS = ["ldaps://ldap-replica-1.osg.chtc.io", "ldaps://ldap-replica-2.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
-OSG_LDAP_BASE_DN = "dc=osg-htc,dc=org"
+
+# LDAP Server Connection and Search Config, required keys
+class LDAP_CONFIG_KEYS(StrEnum):
+    LDAP_Server_URL = "LDAPServerURl"
+    LDAP_Search_Base = "SearchBase"
+    LDAP_User = "User"
+    LDAP_AuthTok_File = "AuthTokenFile"
+
+LDAP_CONFIG_USAGE_MESSAGE = f"""
+    file at LDAP_CONFIG_PATH should be in ini format, servers will be attempted in descending order.
+    An example section of this config file follows:
+
+    ---
+
+    [human_server_name] # arbitrary human label for this server's config
+    {LDAP_CONFIG_KEYS.LDAP_Server_URL} = ldaps://ldap-replica-1.osg.chtc.io      # URL to reach this LDAP server from
+    {LDAP_CONFIG_KEYS.LDAP_Search_Base} = dc=osg-htc,dc=org                      # LDAP Search Base 
+    {LDAP_CONFIG_KEYS.LDAP_User} = cn=readonly,ou=system,dc=osg-htc,dc=org       # full LDAP user DN 
+    {LDAP_CONFIG_KEYS.LDAP_AuthTok_File} = /etc/ldap-secrets/osg-ldap/authtoken  # file containing authtoken for access
+
+    ---
+
+    Config file should contain one such section per LDAP server to communicate with.
+    """
+
 
 GET    = "GET"
 PUT    = "PUT"
@@ -54,6 +76,13 @@ class URLRequestError(Error):
     """Class for exceptions due to not being able to fulfill a URLRequest"""
     pass
 
+class EmptyConfiguration(Error):
+    """Class for exceptions due to loading an empty Config file, or one where every section lacked the required keys"""
+    pass
+
+class NoLDAPResponse(Error):
+    """Class for exceptions due to being unable to get any request from any configured LDAP servers."""
+    pass
 
 def getpw(user, passfd, passfile):
     if ":" in user:
@@ -76,27 +105,57 @@ def mkauthstr(user, passwd):
     raw_authstr = "%s:%s" % (user, passwd)
     return encodebytes(raw_authstr.encode()).decode().replace("\n", "")
 
-
-def get_ldap_authtoks(ldap_auth_path):
-    auth_path = pathlib.Path(ldap_auth_path)
-    authfile_list = []
-    ldap_authtok_list = []
-    if ldap_auth_path is not None and auth_path.exists():
-        if auth_path.is_dir():
-            for child in auth_path.iterdir():
-                if child.is_file():
-                    authfile_list.append(child)
-        elif auth_path.is_file():
-            authfile_list.append()
-        else:
-            raise ValueError
-        
-        for entry in authfile_list:
-            with entry.open() as authfile:
-                ldap_authtok_list.append(authfile.readline().strip())
+def get_ldap_authtok(ldap_authfile):
+    if ldap_authfile is not None:
+        ldap_authtok = open(ldap_authfile).readline().strip()
     else:
         raise PermissionError
-    return ldap_authtok_list
+    return ldap_authtok
+
+def read_ldap_conffile(ldap_conffile_path):
+    config = configparser.ConfigParser(allow_no_value=True)
+
+    print(f"Attempting to read config from {ldap_conffile_path}")
+    config.read(ldap_conffile_path)
+    config.has_option
+    misconfigured_sections = list()
+    for section in config.sections():
+        for key in LDAP_CONFIG_KEYS:
+            # All servers must have all required keys for operation
+            if not config.has_option(section, key) or config.get(section, key) is "":
+                print(f"Section \"{section}\": required key \"{key}\" missing, ignoring section.")
+                misconfigured_sections.append(section)
+                break
+        # For-Else to only check authToken file if we know it exists (i.e. we didn't break)
+        else:
+            # All server AuthTok files must exist, be files, and not be empty
+            token_path = Path(config.get(section, LDAP_CONFIG_KEYS.LDAP_AuthTok_File))
+            try:
+                if not token_path.exists():
+                    print(f"Section \"{section}\": AuthToken File missing or non-file, ignoring section.")
+                    misconfigured_sections.append(section)
+                    continue
+                if token_path.stat().st_size == 0 :
+                    print(f"Section \"{section}\": AuthToken File is empty, ignoring section.")
+                    misconfigured_sections.append(section)
+                    continue
+            except OSError as e:
+                print(f"Section \"{section}\": Exception raised while checking AuthTok File: {e}, skipping section.")
+                misconfigured_sections.append(section)
+                continue
+
+    for section in misconfigured_sections:
+        print(f"Dropping section {section}")
+        config.remove_section(section)
+
+    # if their are no servers in the file that have all required keys
+    if len(config.sections()) == 0:
+        #when script needs to say LDAP Config required, raise a EmptyConfiguration error
+        #usage("LDAP Config File Required")
+        raise EmptyConfiguration(
+            f"Config file at {ldap_conffile_path} was empty or all sections lacked required keys."
+        )
+    return config
 
 
 def mkrequest(method, target, data, endpoint, authstr, **kw):
@@ -195,25 +254,14 @@ def get_datalist(data, listname):
     return data[listname] if data else []
 
 
-class LDAPSearch:
+class LDAP_Server:
     """ Wrapper class for LDAP searches. """
     server: Server = None
     connection: Connection = None
 
-    def __init__(self, ldap_server, ldap_user, ldap_authtok_list):
+    def __init__(self, ldap_server, ldap_user, ldap_authtok):
         self.server = Server(ldap_server, get_info=ALL)
-        for ldap_authtok in ldap_authtok_list:
-            try:
-                self.connection = Connection(self.server, ldap_user, ldap_authtok, client_strategy=SAFE_SYNC, auto_bind=True)
-                break
-            except LDAPInvalidCredentialsResult as wrongCreds:
-                continue
-        else:
-            #https://docs.python.org/3.7/tutorial/controlflow.html#break-and-continue-statements-and-else-clauses-on-loops
-
-            # The only exceptions were "Invalid Creds" but we still failed to break out
-            # Therefore all creds failed
-            raise LDAPInvalidCredentialsResult
+        self.connection = Connection(self.server, ldap_user, ldap_authtok, client_strategy=SAFE_SYNC, auto_bind=True)
 
     def search(self, ou, search_base, filter_str, attrs):
         # simple paged search
@@ -229,49 +277,59 @@ class LDAPSearch:
 
         return response
 
-def do_ldap_fallback_search(ldap_server_list, ldap_authtok_list, search_ou, search_filter, attrs):
+# TODO:
+# do_ldap_fallback_search, get_ldap_groups, and get_ldap_active_users_and_groups should be a method of the LDAPSearch class
+# script calling this lib should init LDAPSearch, then call the method that asks for the info it wants.
+# Be able to feed in either one server's config to the LDAPSearch, or a conffile to parse with a list of >=1 LDAP servers to do fallback searches with.
+
+def do_ldap_fallback_search(search_ou, search_filter, attrs, ldap_config: configparser.ConfigParser):
     response = None
 
-    for ldap_server in ldap_server_list:
-        print(f"Attempting search with server {ldap_server}")
-        try:            
-            search_base = None
+    if ldap_config == None:
+        raise EmptyConfiguration(
+            "Search Attempted with \"None\" config object."
+        )
 
-            if ldap_server in CILGON_LDAP_SERVERS:
-                search_base = CILOGON_LDAP_BASE_DN
-            elif ldap_server in OSG_LDAP_SERVERS:
-                search_base = OSG_LDAP_BASE_DN
-            else:
-                print(f"No Search Base found for server {ldap_server}. Skipping.")
-                continue
+    for section in ldap_config.sections():
+        print(f"Attempting search with server {section}")
+        try:
+            server_url = ldap_config.get(section, LDAP_CONFIG_KEYS.LDAP_Server_URL)
+            search_base = ldap_config.get(section, LDAP_CONFIG_KEYS.LDAP_Search_Base)
+            search_user = ldap_config.get(section, LDAP_CONFIG_KEYS.LDAP_User)
+            authtok_file = ldap_config.get(section, LDAP_CONFIG_KEYS.LDAP_AuthTok_File)
+            authtok = get_ldap_authtok(authtok_file)
             
             if not search_base is None: 
-                searcher = LDAPSearch(ldap_server, f"uid=readonly_user,ou=system,{search_base}", ldap_authtok_list)
+                searcher = LDAP_Server(ldap_server=server_url, ldap_user=search_user, ldap_authtok=authtok)
                 response = searcher.search(search_ou, search_base, search_filter, attrs)
                 
                 #If we get a response from one of the servers, we don't need to check the rest 
                 if not response is None:
-                    print(f"Response found for server {ldap_server}.")
+                    print(f"Response found for server {section}.")
                     break
+        # Perm issue reading token file
+        except PermissionError as permError:
+            print(f"Permission Error when attempting search for {section}: {permError}.")
+        # Problem getting LDAP Response
         except LDAPException as ldapError:
-            print(f"Exception occurred when attempting search for {ldap_server}: {ldapError}.")
+            print(f"Exception occurred when attempting search for {section}: {ldapError}.")
             continue
 
     if response is None:
-        print(f"No response found via LDAP servers {ldap_server_list}. Exiting.")
-        raise Exception
+        raise NoLDAPResponse(
+            f"No response found via LDAP servers: {[section for section in ldap_config]}."
+        )
 
     return response
 
-def get_ldap_groups(ldap_server_list, ldap_authtok_list):
+def get_ldap_groups(config=None):
     ldap_group_osggids = set()
 
     response = do_ldap_fallback_search(
-        ldap_server_list, 
-        ldap_authtok_list=ldap_authtok_list,
         search_ou="groups",
         search_filter="(cn=*)",
-        attrs=["gidNumber"]
+        attrs=["gidNumber"],
+        ldap_config=config
     )
 
     for group in response:
@@ -279,18 +337,17 @@ def get_ldap_groups(ldap_server_list, ldap_authtok_list):
     return ldap_group_osggids
 
 
-def get_ldap_active_users_and_groups(ldap_server_list, ldap_user, ldap_authtok, filter_group_name=None):
+def get_ldap_active_users_and_groups(filter_group_name=None, config=None):
     """ Retrieve a dictionary of active users from LDAP, with their group memberships. """
     ldap_active_users = dict()
     filter_str = ("(isMemberOf=CO:members:active)" if filter_group_name is None 
                   else f"(&(isMemberOf={filter_group_name})(isMemberOf=CO:members:active))")
 
     response = do_ldap_fallback_search(
-        ldap_server_list=ldap_server_list,  
-        ldap_authtok_list=ldap_authtok,
         search_ou="people",
         search_filter=filter_str,
-        attrs=["employeeNumber", "isMemberOf"]
+        attrs=["employeeNumber", "isMemberOf"],
+        ldap_config=config
     )
 
     for person in response:
@@ -378,3 +435,5 @@ def provision_group_members(gid, prov_id, endpoint, authstr):
             path = f"co_provisioning_targets/provision/{prov_id}/copersonid:{pid}.json"
             responses[pid] = call_api3(POST, path, data, endpoint, authstr)
     return responses
+
+breakpoint()
