@@ -117,7 +117,6 @@ def read_ldap_conffile(ldap_conffile_path):
 
     print(f"Attempting to read config from {ldap_conffile_path}")
     config.read(ldap_conffile_path)
-    config.has_option
     misconfigured_sections = list()
     for section in config.sections():
         for key in LDAP_CONFIG_KEYS:
@@ -126,7 +125,7 @@ def read_ldap_conffile(ldap_conffile_path):
                 print(f"Section \"{section}\": required key \"{key}\" missing, ignoring section.")
                 misconfigured_sections.append(section)
                 break
-        # For-Else to only check authToken file if we know it exists (i.e. we didn't break)
+        # For-Else to only check key values if we know the required ones exist (i.e. we didn't break)
         else:
             # All server AuthTok files must exist, be files, and not be empty
             token_path = Path(config.get(section, LDAP_CONFIG_KEYS.LDAP_AuthTok_File))
@@ -435,5 +434,3 @@ def provision_group_members(gid, prov_id, endpoint, authstr):
             path = f"co_provisioning_targets/provision/{prov_id}/copersonid:{pid}.json"
             responses[pid] = call_api3(POST, path, data, endpoint, authstr)
     return responses
-
-breakpoint()
