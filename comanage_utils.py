@@ -44,21 +44,22 @@ class LDAP_CONFIG_KEYS(StrEnum):
     LDAP_AuthTok_File = "AuthTokenFile"
 
 LDAP_CONFIG_USAGE_MESSAGE = f"""
-    file at LDAP_CONFIG_PATH should be in ini format, servers will be attempted in descending order.
-    An example section of this config file follows:
+LDAP CONNECTION CONFIG:
+File at LDAP_CONFIG_PATH should be in ini format, servers will be attempted in descending order.
+An example section of this config file follows:
 
-    ---
+---
 
-    [human_server_name] # arbitrary human label for this server's config
-    {LDAP_CONFIG_KEYS.LDAP_Server_URL} = ldaps://ldap-replica-1.osg.chtc.io      # URL to reach this LDAP server from
-    {LDAP_CONFIG_KEYS.LDAP_Search_Base} = dc=osg-htc,dc=org                      # LDAP Search Base 
-    {LDAP_CONFIG_KEYS.LDAP_User} = cn=readonly,ou=system,dc=osg-htc,dc=org       # full LDAP user DN 
-    {LDAP_CONFIG_KEYS.LDAP_AuthTok_File} = /etc/ldap-secrets/osg-ldap/authtoken  # file containing authtoken for access
+[human_server_name] # arbitrary human label for this server's config
+{LDAP_CONFIG_KEYS.LDAP_Server_URL} = ldaps://ldap-replica-1.osg.chtc.io      # URL to reach this LDAP server from
+{LDAP_CONFIG_KEYS.LDAP_Search_Base} = dc=osg-htc,dc=org                      # LDAP Search Base 
+{LDAP_CONFIG_KEYS.LDAP_User} = cn=readonly,ou=system,dc=osg-htc,dc=org       # full LDAP user DN 
+{LDAP_CONFIG_KEYS.LDAP_AuthTok_File} = /etc/ldap-secrets/osg-ldap/authtoken  # file containing authtoken for access
 
-    ---
+---
 
-    Config file should contain one such section per LDAP server to communicate with.
-    """
+Config file should contain one such section per LDAP server to communicate with.
+"""
 
 
 GET    = "GET"

@@ -7,8 +7,6 @@ import comanage_utils as utils
 
 SCRIPT = os.path.basename(__file__)
 ENDPOINT = "https://registry.cilogon.org/registry/"
-LDAP_SERVER_LIST = ["ldaps://ldap-replica-1.osg.chtc.io", "ldaps://ldap-replica-2.osg.chtc.io", "ldaps://ldap-replica.osg-services.nautilus.chtc.io"]
-LDAP_USER = "uid=readonly_user,ou=system,o=OSG,o=CO,dc=cilogon,dc=org"
 OSG_CO_ID = 7
 UNIX_CLUSTER_ID = 1
 LDAP_TARGET_ID = 6
